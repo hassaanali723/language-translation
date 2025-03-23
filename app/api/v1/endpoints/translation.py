@@ -1,14 +1,17 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from typing import List
+import os
 
 from app.schemas.translation import (
     TranslationRequest,
     TranslationResponse,
     SupportedLanguagesResponse,
-    LanguageInfo
+    LanguageInfo,
+    FileTranslationResponse
 )
 from app.services.translation.libre_translate import LibreTranslateService
 from app.services.translation.base import BaseTranslationService
+from app.core.logging import logger
 
 router = APIRouter()
 
@@ -55,4 +58,94 @@ async def detect_language(
         detected_lang = await translation_service.detect_language(text)
         return detected_lang
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/translate/file", response_model=FileTranslationResponse)
+async def translate_file(
+    file: UploadFile = File(...),
+    source_lang: str = Form(...),
+    target_lang: str = Form(...),
+    translation_service: BaseTranslationService = Depends(get_translation_service)
+):
+    """
+    Translate a document file from source language to target language.
+    Supports formats that LibreTranslate can handle (e.g., .txt, .docx, .pdf)
+    """
+    try:
+        # Check if service is available
+        if hasattr(translation_service, 'health_check'):
+            is_healthy = await translation_service.health_check()
+            if not is_healthy:
+                raise HTTPException(
+                    status_code=503, 
+                    detail="Translation service is currently unavailable. Please try again later."
+                )
+        
+        # Validate file size (optional, adjust limit as needed)
+        file_size = 0
+        chunk_size = 1024 * 1024  # 1MB
+        while chunk := await file.read(chunk_size):
+            file_size += len(chunk)
+            if file_size > 10 * 1024 * 1024:  # 10MB limit
+                raise HTTPException(status_code=400, detail="File too large")
+        
+        logger.info(f"Processing file translation request", extra={
+            "file_name": file.filename,
+            "file_size": file_size,
+            "source_lang": source_lang,
+            "target_lang": target_lang
+        })
+        
+        # Reset file position after reading
+        await file.seek(0)
+        
+        # Translate file
+        translated_file_url, translated_filename = await translation_service.translate_file(
+            file,
+            source_lang,
+            target_lang
+        )
+        
+        return FileTranslationResponse(
+            success=True,
+            translated_file_name=translated_filename,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            translated_file_url=translated_file_url
+        )
+        
+    except HTTPException as e:
+        # Pass through HTTP exceptions from the service
+        logger.error(f"File translation HTTP exception: {e.detail}", extra={
+            "file_name": file.filename,
+            "status_code": e.status_code
+        })
+        raise
+    except Exception as e:
+        error_message = str(e)
+        logger.error(f"File translation failed: {error_message}", extra={
+            "file_name": file.filename
+        })
+        raise HTTPException(status_code=500, detail=error_message)
+
+@router.get("/health", status_code=200)
+async def check_health(
+    translation_service: BaseTranslationService = Depends(get_translation_service)
+):
+    """
+    Check if the translation service is up and running
+    """
+    try:
+        # Check if service has a health check method
+        if hasattr(translation_service, 'health_check'):
+            is_healthy = await translation_service.health_check()
+            if not is_healthy:
+                return {"status": "error", "message": "Translation service is not available"}
+            return {"status": "ok", "message": "Translation service is available"}
+        else:
+            # Fallback to getting languages as a health check
+            await translation_service.get_supported_languages()
+            return {"status": "ok", "message": "Translation service is available"}
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return {"status": "error", "message": str(e)}, 503 

@@ -39,3 +39,9 @@ env/
 
 # Logs
 *.log 
+# Virtual environment
+venv_py311/
+
+# Generated files
+translated_file*.txt
+.DS_Store

@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from app.schemas.translation import LanguageInfo
+from fastapi import UploadFile
 
 class BaseTranslationService(ABC):
     """Abstract base class for translation services"""
@@ -40,5 +41,20 @@ class BaseTranslationService(ABC):
             
         Returns:
             Detected language code
+        """
+        pass
+        
+    @abstractmethod
+    async def translate_file(self, file: UploadFile, source_lang: str, target_lang: str) -> Tuple[str, str]:
+        """
+        Translate a document file from source language to target language
+        
+        Args:
+            file: File to translate
+            source_lang: Source language code
+            target_lang: Target language code
+            
+        Returns:
+            Tuple containing (translated_file_url, translated_filename)
         """
         pass 

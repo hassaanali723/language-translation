@@ -17,4 +17,11 @@ class LanguageInfo(BaseModel):
     name: str = Field(..., description="Language name (e.g., 'English')")
 
 class SupportedLanguagesResponse(BaseModel):
-    languages: List[LanguageInfo] = Field(..., description="List of supported languages") 
+    languages: List[LanguageInfo] = Field(..., description="List of supported languages")
+
+class FileTranslationResponse(BaseModel):
+    success: bool = Field(..., description="Whether the translation was successful")
+    translated_file_name: str = Field(..., description="Name of the translated file")
+    translated_file_url: str = Field(..., description="URL to download the translated file")
+    source_lang: str = Field(..., description="Source language code")
+    target_lang: str = Field(..., description="Target language code") 
