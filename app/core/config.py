@@ -26,6 +26,19 @@ class Settings(BaseSettings):
     RATE_LIMIT_REQUESTS: int = 100  # requests per window
     RATE_LIMIT_WINDOW: int = 60  # window in seconds
 
+    # File Storage Configuration
+    STORAGE_PATH: str = "./storage/translations"  # Local path to store translations
+    FILE_RETENTION_DAYS: int = 7  # Number of days to keep files
+    
+    # Storage settings
+    STORAGE_TYPE: str = "local"  # Options: local, s3 (future)
+    
+    # AWS S3 settings (for future use)
+    AWS_ACCESS_KEY_ID: Optional[str] = None
+    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    AWS_REGION: Optional[str] = None
+    AWS_BUCKET_NAME: Optional[str] = None
+
     class Config:
         case_sensitive = True
         env_file = ".env"

@@ -1,6 +1,9 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from typing import List
 import os
+from pathlib import Path
+from datetime import datetime, timezone
 
 from app.schemas.translation import (
     TranslationRequest,
@@ -12,6 +15,7 @@ from app.schemas.translation import (
 from app.services.translation.libre_translate import LibreTranslateService
 from app.services.translation.base import BaseTranslationService
 from app.core.logging import logger
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -100,18 +104,18 @@ async def translate_file(
         await file.seek(0)
         
         # Translate file
-        translated_file_url, translated_filename = await translation_service.translate_file(
+        result = await translation_service.translate_file(
             file,
             source_lang,
             target_lang
         )
         
         return FileTranslationResponse(
-            success=True,
-            translated_file_name=translated_filename,
-            source_lang=source_lang,
-            target_lang=target_lang,
-            translated_file_url=translated_file_url
+            success=result["success"],
+            translated_file_name=result["translated_file_name"],
+            source_lang=result["source_lang"],
+            target_lang=result["target_lang"],
+            translated_file_url=result["translated_file_url"]
         )
         
     except HTTPException as e:
@@ -149,3 +153,37 @@ async def check_health(
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
         return {"status": "error", "message": str(e)}, 503 
+
+@router.get("/download/{file_id}")
+async def download_translated_file(file_id: str):
+    """Download a translated file by its ID."""
+    try:
+        # Find the file with any extension
+        storage_path = Path(settings.STORAGE_PATH)
+        files = list(storage_path.glob(f"{file_id}.*"))
+        file_path = next((f for f in files if not f.name.endswith('.meta')), None)
+        
+        if not file_path:
+            raise HTTPException(status_code=404, detail="File not found")
+            
+        # Get original filename from metadata
+        meta_path = storage_path / f"{file_id}.meta"
+        original_filename = file_path.name
+        if meta_path.exists():
+            with open(meta_path, 'r') as f:
+                original_filename = f.readline().strip()
+        
+        # Stream the file
+        def iterfile():
+            with open(file_path, 'rb') as f:
+                yield from f
+                
+        return StreamingResponse(
+            iterfile(),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{original_filename}"'}
+        )
+        
+    except Exception as e:
+        logger.error(f"Error downloading file {file_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error downloading file") 

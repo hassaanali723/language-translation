@@ -9,6 +9,38 @@ from fastapi import HTTPException, UploadFile
 import asyncio
 from datetime import datetime, timedelta
 import os
+import uuid
+from pathlib import Path
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold: int, failure_window: int, reset_timeout: int):
+        self.failure_threshold = failure_threshold
+        self.failure_window = failure_window
+        self.reset_timeout = reset_timeout
+        self.failures = []
+        self.is_open = False
+        self.reset_time = None
+
+    def record_failure(self):
+        current_time = datetime.utcnow()
+        self.failures = [f for f in self.failures 
+                        if f > current_time - timedelta(seconds=self.failure_window)]
+        self.failures.append(current_time)
+        
+        if len(self.failures) >= self.failure_threshold:
+            self.is_open = True
+            self.reset_time = current_time + timedelta(seconds=self.reset_timeout)
+
+    def allow_request(self) -> bool:
+        if not self.is_open:
+            return True
+            
+        if datetime.utcnow() >= self.reset_time:
+            self.is_open = False
+            self.failures = []
+            return True
+            
+        return False
 
 class LibreTranslateService(BaseTranslationService):
     def __init__(self):
@@ -19,18 +51,29 @@ class LibreTranslateService(BaseTranslationService):
             
         logger.info(f"Initializing LibreTranslate service with URL: {self.base_url}")
         
+        # Create storage directory if it doesn't exist
+        self.storage_path = Path(settings.STORAGE_PATH)
+        self.storage_path.mkdir(parents=True, exist_ok=True)
+        
         try:
             self.cache = RedisCache()
             self.redis_available = True
         except:
             logger.warning("Redis not available, running without cache")
             self.redis_available = False
-        self.failure_threshold = settings.CIRCUIT_BREAKER_FAILURE_THRESHOLD
-        self.failure_window = settings.CIRCUIT_BREAKER_FAILURE_WINDOW
-        self.failures = []
-        self.circuit_open = False
-        self.reset_time = None
-        
+            
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=settings.CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+            failure_window=settings.CIRCUIT_BREAKER_FAILURE_WINDOW,
+            reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT
+        )
+        self.headers = {}
+
+    def _is_text_file(self, filename: str) -> bool:
+        """Check if the file is a text file based on extension."""
+        text_extensions = {'.txt', '.json', '.csv', '.md', '.log'}
+        return os.path.splitext(filename)[1].lower() in text_extensions
+
     async def health_check(self) -> bool:
         """Check if LibreTranslate service is available and responsive."""
         try:
@@ -47,10 +90,10 @@ class LibreTranslateService(BaseTranslationService):
         
     async def _check_circuit_breaker(self):
         """Circuit breaker implementation"""
-        if self.circuit_open:
-            if datetime.utcnow() >= self.reset_time:
-                self.circuit_open = False
-                self.failures = []
+        if self.circuit_breaker.is_open:
+            if datetime.utcnow() >= self.circuit_breaker.reset_time:
+                self.circuit_breaker.is_open = False
+                self.circuit_breaker.failures = []
             else:
                 raise HTTPException(
                     status_code=503,
@@ -58,8 +101,8 @@ class LibreTranslateService(BaseTranslationService):
                 )
                 
         # Clean old failures
-        self.failures = [f for f in self.failures 
-                        if f > datetime.utcnow() - timedelta(seconds=self.failure_window)]
+        self.circuit_breaker.failures = [f for f in self.circuit_breaker.failures 
+                        if f > datetime.utcnow() - timedelta(seconds=self.circuit_breaker.failure_window)]
     
     async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
         try:
@@ -101,11 +144,7 @@ class LibreTranslateService(BaseTranslationService):
                 return translated
                 
         except httpx.HTTPError as e:
-            self.failures.append(datetime.utcnow())
-            if len(self.failures) >= self.failure_threshold:
-                self.circuit_open = True
-                self.reset_time = datetime.utcnow() + timedelta(seconds=settings.CIRCUIT_BREAKER_RESET_TIMEOUT)
-            
+            self.circuit_breaker.record_failure()
             logger.error("Translation failed", extra={
                 "error_msg": str(e), 
                 "text_len": len(text)
@@ -156,141 +195,179 @@ class LibreTranslateService(BaseTranslationService):
             })
             raise HTTPException(status_code=500, detail="Language detection failed")
 
-    async def translate_file(self, file: UploadFile, source_lang: str, target_lang: str) -> tuple[str, str]:
-        """
-        Translate a file using LibreTranslate's file translation endpoint.
-        Returns the URL to the translated file and the suggested filename.
-        """
-        try:
-            # Check circuit breaker
-            await self._check_circuit_breaker()
+    def _save_file_locally(self, content: bytes, original_filename: str) -> tuple[str, str]:
+        """Save file to local storage and return file ID and path."""
+        # Generate unique ID and filename
+        file_id = str(uuid.uuid4())
+        extension = os.path.splitext(original_filename)[1]
+        filename = f"{file_id}{extension}"
+        
+        # Save file
+        file_path = self.storage_path / filename
+        with open(file_path, 'wb') as f:
+            f.write(content)
             
-            logger.info("Translating file", extra={
+        # Save metadata (creation time, original filename)
+        meta_path = self.storage_path / f"{file_id}.meta"
+        with open(meta_path, 'w') as f:
+            f.write(f"{original_filename}\n{datetime.utcnow().isoformat()}")
+            
+        return file_id, str(file_path)
+
+    def _get_translated_filename(self, original_filename: str, target_lang: str) -> str:
+        """Generate a filename for the translated file."""
+        name, ext = os.path.splitext(original_filename)
+        return f"{name}_{target_lang}{ext}"
+
+    async def translate_file(self, file: UploadFile, source_lang: str, target_lang: str) -> dict:
+        """Translate a file using LibreTranslate."""
+        try:
+            logger.info(f"Starting file translation", extra={
                 "file_name": file.filename,
-                "source": source_lang,
-                "target": target_lang,
-                "content_type": file.content_type
+                "file_content_type": file.content_type,
+                "source_lang": source_lang,
+                "target_lang": target_lang
             })
             
-            # Read file content once to avoid multiple reads
             file_content = await file.read()
-            
-            # Log request details
-            logger.info(f"Sending request to {self.base_url}/translate_file", extra={
-                "url": f"{self.base_url}/translate_file",
+            logger.info(f"File read successfully", extra={
                 "file_size": len(file_content),
                 "file_name": file.filename
             })
             
-            try:
-                # Try first with /translate_file endpoint
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    try:
-                        # First attempt with /translate_file
-                        response = await client.post(
-                            f"{self.base_url}/translate_file",
-                            files={'file': (file.filename, file_content, file.content_type)},
-                            data={
-                                'source': source_lang,
-                                'target': target_lang
-                            }
-                        )
-                        
-                        # Log response status
-                        logger.info(f"Received response with status {response.status_code}", extra={
-                            "status_code": response.status_code
-                        })
-                        
-                        response.raise_for_status()
-                        
-                        try:
-                            response_data = response.json()
-                            logger.info("Successfully parsed response JSON", extra={
-                                "response_keys": list(response_data.keys())
-                            })
-                        except Exception as json_e:
-                            # If not JSON, this might be direct file content response
-                            logger.warning(f"Response is not JSON, might be direct file content", extra={
-                                "content_type": response.headers.get("content-type"),
-                                "content_length": len(response.content)
-                            })
-                            
-                            # Generate a local URL for the file content
-                            # Create temporary directory if it doesn't exist
-                            os.makedirs("temp", exist_ok=True)
-                            
-                            # Generate translated filename
-                            filename_parts = os.path.splitext(file.filename)
-                            translated_filename = f"{filename_parts[0]}_{target_lang}{filename_parts[1]}"
-                            
-                            # Save translated file locally
-                            file_path = os.path.join("temp", translated_filename)
-                            with open(file_path, "wb") as f:
-                                f.write(response.content)
-                                
-                            # Return a local URL
-                            return f"/temp/{translated_filename}", translated_filename
-                        
-                        # Check the structure of the response
-                        if 'translatedFileUrl' in response_data:
-                            translated_file_url = response_data['translatedFileUrl']
-                        else:
-                            logger.warning("Response doesn't contain translatedFileUrl, checking for other patterns", extra={
-                                "response_data": response_data
-                            })
-                            
-                            # Check for other possible response formats
-                            if 'url' in response_data:
-                                translated_file_url = response_data['url']
-                            elif 'translated_url' in response_data:
-                                translated_file_url = response_data['translated_url']
-                            else:
-                                raise ValueError(f"Unrecognized response format. Got keys: {list(response_data.keys())}")
-                        
-                        # Generate translated filename
-                        filename_parts = os.path.splitext(file.filename)
-                        translated_filename = f"{filename_parts[0]}_{target_lang}{filename_parts[1]}"
-                        
-                        return translated_file_url, translated_filename
-                        
-                    except httpx.HTTPStatusError as status_e:
-                        logger.warning(f"translate_file endpoint failed with status {status_e.response.status_code}, trying alternative approach", extra={
-                            "error": str(status_e),
-                            "status_code": status_e.response.status_code
-                        })
-                        raise
-                        
-            except httpx.TimeoutException as te:
-                error_msg = f"Request to LibreTranslate timed out after 120 seconds: {str(te)}"
-                logger.error(error_msg, extra={"file_name": file.filename})
-                raise HTTPException(status_code=504, detail=error_msg)
-                
-        except httpx.HTTPError as e:
-            self.failures.append(datetime.utcnow())
-            if len(self.failures) >= self.failure_threshold:
-                self.circuit_open = True
-                self.reset_time = datetime.utcnow() + timedelta(seconds=settings.CIRCUIT_BREAKER_RESET_TIMEOUT)
+            files = {"file": (file.filename, file_content)}
+            data = {"source": source_lang, "target": target_lang}
             
-            error_msg = f"File translation HTTP error: {str(e)}"
-            
-            # Add more diagnostics for connection error
-            if isinstance(e, httpx.ConnectError):
-                error_msg = f"Could not connect to LibreTranslate service at {self.base_url}: {str(e)}"
-            
-            logger.error(error_msg, extra={
-                "error_type": type(e).__name__,
-                "error_msg": str(e),
-                "file_name": file.filename,
-                "url": f"{self.base_url}/translate_file"
-            })
-            
-            raise HTTPException(status_code=503, detail=error_msg)
-            
-        except Exception as e:
-            error_msg = f"File translation general error: {str(e)}"
-            logger.error(error_msg, extra={
-                "error_type": type(e).__name__,
-                "error_msg": str(e),
+            logger.info(f"Sending request to LibreTranslate", extra={
+                "url": f"{self.base_url}/translate_file",
                 "file_name": file.filename
             })
-            raise HTTPException(status_code=500, detail=error_msg) 
+            
+            # Increased timeout to 120 seconds for file translation
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                try:
+                    response = await client.post(
+                        f"{self.base_url}/translate_file",
+                        files=files,
+                        data=data,
+                        headers=self.headers
+                    )
+                    
+                    logger.info(f"Received response from LibreTranslate", extra={
+                        "status_code": response.status_code,
+                        "response_length": len(response.content),
+                        "file_name": file.filename
+                    })
+                    
+                    if response.status_code != 200:
+                        error_detail = response.text
+                        try:
+                            error_json = response.json()
+                            if 'error' in error_json:
+                                error_detail = error_json['error']
+                        except Exception as json_e:
+                            logger.error(f"Failed to parse error response as JSON", extra={
+                                "error": str(json_e),
+                                "response_text": response.text[:500]  # Log first 500 chars of response
+                            })
+                            
+                        logger.error(f"LibreTranslate API error", extra={
+                            "status_code": response.status_code,
+                            "error_detail": error_detail,
+                            "file_name": file.filename,
+                            "headers": dict(response.headers),
+                            "url": str(response.url)
+                        })
+                        raise HTTPException(
+                            status_code=response.status_code,
+                            detail=f"Translation failed: {error_detail}"
+                        )
+                    
+                    response_data = response.json()
+                    if "translatedFileUrl" not in response_data:
+                        logger.error("Missing translatedFileUrl in response", extra={
+                            "response_data": response_data,
+                            "file_name": file.filename
+                        })
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Invalid response from translation service: missing translated file URL"
+                        )
+                    
+                    # Get translated file from LibreTranslate
+                    translated_url = response_data["translatedFileUrl"]
+                    logger.info(f"Downloading translated file", extra={
+                        "translated_url": translated_url,
+                        "file_name": file.filename
+                    })
+                    
+                    # Also use increased timeout for downloading the translated file
+                    async with httpx.AsyncClient(timeout=120.0) as client:
+                        translated_response = await client.get(translated_url)
+                        if translated_response.status_code != 200:
+                            logger.error(f"Failed to download translated file", extra={
+                                "status_code": translated_response.status_code,
+                                "url": translated_url,
+                                "response": translated_response.text[:500]
+                            })
+                            raise HTTPException(
+                                status_code=translated_response.status_code,
+                                detail=f"Failed to download translated file: {translated_response.text}"
+                            )
+                        
+                        # Save translated file locally
+                        translated_filename = self._get_translated_filename(file.filename, target_lang)
+                        file_id, file_path = self._save_file_locally(
+                            translated_response.content,
+                            translated_filename
+                        )
+                        
+                        logger.info(f"Translation completed successfully", extra={
+                            "original_file": file.filename,
+                            "translated_file": translated_filename,
+                            "file_id": file_id
+                        })
+                        
+                        return {
+                            "success": True,
+                            "translated_file_name": translated_filename,
+                            "translated_file_url": f"/api/v1/translation/download/{file_id}",
+                            "source_lang": source_lang,
+                            "target_lang": target_lang
+                        }
+                        
+                except httpx.TimeoutException as e:
+                    logger.error(f"Request timeout", extra={
+                        "timeout_seconds": 120.0,  # Updated timeout in error message
+                        "error": str(e),
+                        "file_name": file.filename
+                    })
+                    raise HTTPException(
+                        status_code=504,
+                        detail="Translation request timed out after 120 seconds. Please try with a smaller file or try again later."
+                    )
+                except httpx.RequestError as e:
+                    logger.error(f"Request failed", extra={
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "file_name": file.filename
+                    })
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Failed to connect to translation service: {str(e)}"
+                    )
+                    
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error during file translation", extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "file_name": file.filename,
+                "traceback": str(e.__traceback__)
+            })
+            raise HTTPException(
+                status_code=500,
+                detail=f"File translation failed: {str(e)}"
+            )
+

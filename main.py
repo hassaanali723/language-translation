@@ -1,9 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
+from app.api.v1.endpoints import translation
 
 app = FastAPI(
-    title="Language Translator API",
-    description="API for translating text between different languages",
+    title=settings.PROJECT_NAME,
+    description="API for translating text, files, and documents between different languages",
     version="1.0.0"
 )
 
@@ -16,10 +18,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Import and include routers
-from app.api.v1.endpoints import translation
-app.include_router(translation.router, prefix="/api/v1", tags=["translation"])
+# Include routers
+app.include_router(
+    translation.router,
+    prefix=settings.API_V1_STR,
+    tags=["translation"]
+)
 
 @app.get("/")
 async def root():
-    return {"message": "Welcome to Language Translator API"} 
+    return {
+        "message": "Welcome to Language Translator API",
+        "docs_url": "/docs",
+        "openapi_url": f"{settings.API_V1_STR}/openapi.json"
+    }
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"} 
