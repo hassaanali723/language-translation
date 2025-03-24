@@ -99,7 +99,7 @@ uvicorn main:app --reload
 
 #### Translate Text
 ```http
-POST /api/v1/translate/text
+POST /api/v1/translate
 ```
 
 Request body:
