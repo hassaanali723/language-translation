@@ -1,92 +1,254 @@
-# Language Translation API
+# Language Translator with TTS Support
 
-A robust, enterprise-level language translation API built with FastAPI and LibreTranslate.
+A comprehensive language translation service with text-to-speech capabilities. Built with FastAPI, this application provides translation between multiple languages and high-quality text-to-speech conversion supporting 100+ languages.
 
 ## Features
 
+### Translation
 - Text translation between multiple languages
 - Language detection
-- Caching with Redis
-- Circuit breaker pattern for reliability
+- Batch translation support
+- File translation (.txt, .docx, etc.)
+- Translation memory and caching
+- Rate limiting and usage tracking
+
+### Text-to-Speech (TTS)
+- Speech synthesis in 100+ languages
+- Streaming audio file support
+- Configurable speech parameters (speed, pitch, volume)
+- MP3 audio format
+- Clean service-based architecture
+
+### General Features
+- RESTful API using FastAPI
+- Swagger/OpenAPI documentation
+- Redis caching
+- Prometheus metrics
 - Structured logging
-- Rate limiting
+- Environment-based configuration
 
-## Tech Stack
+## Requirements
 
-- FastAPI
-- LibreTranslate
-- Redis
-- Docker
 - Python 3.8+
+- FastAPI
+- Redis
+- gTTS (Google Text-to-Speech)
+- Other dependencies listed in `requirements.txt`
 
-## Setup
+## Installation
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/hassaanali723/language-translation.git
-cd language-translation
+git clone <your-repo-url>
+cd language-translator
 ```
 
-2. Create a virtual environment and install dependencies:
+2. Create and activate a virtual environment:
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+3. Install dependencies:
+```bash
 pip install -r requirements.txt
 ```
 
-3. Start Redis:
+4. Start Redis:
 ```bash
 docker run --name redis -p 6379:6379 -d redis
 ```
 
-4. Start LibreTranslate:
-```bash
-docker run -it -p 5500:5000 libretranslate/libretranslate
+5. Create a `.env` file with your configuration:
+```env
+# Server Settings
+HOST=0.0.0.0
+PORT=8000
+WORKERS=1
+LOG_LEVEL=info
+
+# Storage
+AUDIO_STORAGE_PATH=./audio_files
+
+# Redis Configuration
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_PASSWORD=
+
+# Rate Limiting
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_REQUESTS=100
+RATE_LIMIT_WINDOW=3600
 ```
 
-5. Run the application:
+## Usage
+
+1. Start the server:
 ```bash
 uvicorn main:app --reload
 ```
 
-The API will be available at `http://localhost:8000`
-
-## API Documentation
-
-Once the server is running, visit:
+2. Access the API documentation at:
 - Swagger UI: `http://localhost:8000/docs`
 - ReDoc: `http://localhost:8000/redoc`
 
-## Environment Variables
+## API Endpoints
 
-Create a `.env` file in the root directory with the following variables:
-```env
-LIBRE_TRANSLATE_URL=http://localhost:5500
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_PASSWORD=
+### Translation
+
+#### Translate Text
+```http
+POST /api/v1/translate/text
 ```
+
+Request body:
+```json
+{
+    "text": "Hello, how are you?",
+    "source_lang": "en",
+    "target_lang": "es"
+}
+```
+
+Response:
+```json
+{
+    "translated_text": "Hola, ¿cómo estás?",
+    "source_lang": "en",
+    "target_lang": "es",
+    "confidence": 0.92
+}
+```
+
+#### Detect Language
+```http
+POST /api/v1/translate/detect
+```
+
+Request body:
+```json
+{
+    "text": "Hello, how are you?"
+}
+```
+
+Response:
+```json
+{
+    "detected_lang": "en",
+    "confidence": 0.98
+}
+```
+
+#### Translate File
+```http
+POST /api/v1/translate/file
+```
+
+Form data:
+- `file`: File to translate
+- `source_lang`: Source language code
+- `target_lang`: Target language code
+
+Response: Translated file download
+
+### Text-to-Speech
+
+#### Convert Text to Speech
+```http
+POST /api/v1/tts/convert
+```
+
+Request body:
+```json
+{
+    "text": "Hello, how are you?",
+    "language": "en",
+    "speed": 1.0,
+    "pitch": null,
+    "volume": null
+}
+```
+
+Response:
+```json
+{
+    "success": true,
+    "audio_file_name": "uuid.mp3",
+    "audio_file_url": "/api/v1/tts/audio/uuid",
+    "language": "en"
+}
+```
+
+#### Get Audio File
+```http
+GET /api/v1/tts/audio/{file_id}
+```
+
+Returns the audio file as a streaming response.
 
 ## Project Structure
 
 ```
-app/
-├── api/
-│   └── v1/
-│       └── endpoints/
-│           └── translation.py
-├── core/
-│   ├── config.py
-│   ├── logging.py
-│   └── rate_limit.py
-├── services/
-│   ├── cache/
-│   │   └── redis_cache.py
-│   └── translation/
-│       ├── base.py
-│       └── libre_translate.py
-└── schemas/
-    └── translation.py
+language-translator/
+├── app/
+│   ├── api/
+│   │   └── v1/
+│   │       └── endpoints/
+│   │           ├── translate.py
+│   │           └── tts.py
+│   ├── core/
+│   │   ├── config.py
+│   │   ├── logging.py
+│   │   └── metrics.py
+│   ├── schemas/
+│   │   ├── translate.py
+│   │   └── tts.py
+│   └── services/
+│       ├── translation/
+│       │   ├── base.py
+│       │   └── translator.py
+│       └── tts/
+│           ├── base.py
+│           └── gtts_service.py
+├── tests/
+│   ├── api/
+│   ├── services/
+│   └── conftest.py
+├── docker/
+│   └── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+├── main.py
+└── README.md
+```
+
+## Monitoring and Metrics
+
+The application exposes Prometheus metrics at `/metrics` endpoint, including:
+- Request counts and latencies
+- Translation and TTS service metrics
+- Cache hit/miss ratios
+- Rate limiting statistics
+
+## Error Handling
+
+The API uses standard HTTP status codes and returns detailed error messages:
+- 400: Bad Request (invalid input)
+- 404: Not Found
+- 429: Too Many Requests (rate limit exceeded)
+- 500: Internal Server Error
+
+Error response format:
+```json
+{
+    "error": {
+        "code": "ERROR_CODE",
+        "message": "Detailed error message",
+        "details": {}
+    }
+}
 ```
 
 ## Contributing
@@ -99,4 +261,4 @@ app/
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+MIT License - see the [LICENSE](LICENSE) file for details. 

@@ -31,6 +31,15 @@ env/
 *.swp
 *.swo
 
+# Environment variables
+.env
+
+# Audio files
+audio_files/
+
+# Logs
+*.log
+
 # OS
 .DS_Store
 .DS_Store?
@@ -42,17 +51,11 @@ Thumbs.db
 
 # Project specific
 storage/
-.env
 *.log
-
-# Environment variables
-.env
 
 # Redis
 *.rdb
 
-# Logs
-*.log 
 # Virtual environment
 venv_py311/
 

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     # File Storage Configuration
     STORAGE_PATH: str = "./storage/translations"  # Local path to store translations
+    AUDIO_STORAGE_PATH: str = "./storage/audio"  # Local path to store audio files
     FILE_RETENTION_DAYS: int = 7  # Number of days to keep files
     
     # Storage settings
